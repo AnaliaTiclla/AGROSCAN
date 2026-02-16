@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Entornos virtuales
+AGROSCAN/
+venv/
+.venv/
+env/
+ENV/
+
+Lib/
+Scripts/
+Include/
+pip-wheel-metadata/
+site-packages/
+
+# VS Code
+.vscode/
+
+# Windows
+Thumbs.db
+.DS_Store
