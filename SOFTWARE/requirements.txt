@@ -1,9 +1,0 @@
-pyqt5
-opencv-python
-pillow
-numpy
-ultralytics
-reportlab
-pip install matplotlib
-
-//hola
