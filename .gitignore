@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Entornos Python
+.venv/
+venv/
+ENV/
+env/
+
+# VSCode
+.vscode/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Reportes generados (si no quieren subir PDFs)
+SOFTWARE/reports/
