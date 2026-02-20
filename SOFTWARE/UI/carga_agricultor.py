@@ -15,7 +15,16 @@ from INFRA.yolo_service import (
     conteos_por_label,
     conteo_sanos_enfermos,
 )
-from INFRA.exportador import generar_pdf_reporte
+
+# ✅ IMPORT ACTUALIZADO: PDF normal + exportación avanzada analítica
+from INFRA.exportador import (
+    generar_pdf_reporte,
+    construir_reporte_analitico,
+    exportar_reporte_analitico_csv,
+    exportar_reporte_analitico_json,
+    generar_pdf_reporte_analitico,
+)
+
 import os
 import cv2
 import time
@@ -33,11 +42,8 @@ YOLO_IOU = 0.30
 ANTI_FLICKER_SEC = 0.35
 
 # --- TRACKING (para no duplicar) ---
-# Distancia máxima (en pixeles) para considerar que es el mismo objeto entre análisis YOLO
 TRACK_MAX_DIST_PX = 70
-# Cuántos "ticks" seguidos debe verse un objeto antes de contarlo (reduce falsos positivos)
 TRACK_CONFIRM_FRAMES = 2
-# Cuántos "ticks" puede desaparecer y seguir siendo el mismo track
 TRACK_MAX_MISSES = 3
 
 BASE_STYLESHEET = """
@@ -220,7 +226,7 @@ class AnalisisChatWindow(QWidget):
         self.guardar_btn.clicked.connect(self.guardar_reporte)
 
     # ==========================
-    # MODO ARCHIVO (igual que antes)
+    # MODO ARCHIVO
     # ==========================
     def cargar_imagen(self):
         if self.camara_activa:
@@ -295,7 +301,7 @@ class AnalisisChatWindow(QWidget):
             self.chat_area.append(f"<span style='color:#ba1a1a;'>❌ Error al registrar sesión: {e}</span>")
 
     # ==========================
-    # CÁMARA EN VIVO (unique sin duplicar)
+    # CÁMARA EN VIVO
     # ==========================
     def toggle_camara(self):
         if self.camara_activa:
@@ -333,10 +339,8 @@ class AnalisisChatWindow(QWidget):
         self.ultimo_frame = None
         self._yolo_en_proceso = False
 
-        # Reset unique
         self._reset_tracker()
 
-        # UI
         self.btn_camara.setText("Detener cámara")
         self.btn_capturar.setEnabled(True)
         self.btn_reset_unique.setEnabled(True)
@@ -377,7 +381,6 @@ class AnalisisChatWindow(QWidget):
 
         self.ultimo_frame = frame.copy()
 
-        # Anti-parpadeo: no pisar el frame anotado recién mostrado
         if self._ultimo_frame_anotado_ts and (time.time() - self._ultimo_frame_anotado_ts) < ANTI_FLICKER_SEC:
             return
 
@@ -402,21 +405,16 @@ class AnalisisChatWindow(QWidget):
                 temp_path, conf_threshold=YOLO_CONF, iou_threshold=YOLO_IOU, draw=True
             )
 
-            # Conteo actual (frame)
             totales = conteo_sanos_enfermos(detections)
             aptos = totales.get("sanos", 0)
             no_aptos = totales.get("enfermos", 0)
             total = totales.get("total", 0)
             self._update_counters(aptos, no_aptos, total)
 
-            # ✅ Tracking: actualizar tracks con detecciones y sumar unique SOLO cuando un ID se confirma
             det_items = self._detections_to_centroids(detections)
             self._update_tracks(det_items)
-
-            # UI unique
             self._update_unique_labels()
 
-            # Mostrar anotada
             if image_with_boxes is not None:
                 self._ultimo_frame_anotado = image_with_boxes
                 self._ultimo_frame_anotado_ts = time.time()
@@ -468,7 +466,7 @@ class AnalisisChatWindow(QWidget):
         return disponibles
 
     # ==========================
-    # TRACKER (simple, sin librerías)
+    # TRACKER
     # ==========================
     def _reset_tracker(self):
         self.live_aptos_unique = 0
@@ -490,10 +488,6 @@ class AnalisisChatWindow(QWidget):
         return "otro"
 
     def _detections_to_centroids(self, detections):
-        """
-        Devuelve lista: [{'cx':..,'cy':..,'label':..}] SOLO si logra extraer bbox.
-        Soporta varias formas comunes de bbox.
-        """
         items = []
         for det in detections or []:
             label = (det.get("label") or det.get("class") or det.get("name") or "").strip()
@@ -507,77 +501,52 @@ class AnalisisChatWindow(QWidget):
         return items
 
     def _extract_bbox(self, det):
-        """
-        Intenta extraer (x1,y1,x2,y2) desde keys típicas.
-        Ajusta aquí si tu yolo_service usa otro formato.
-        """
-        # 1) bbox como lista/tupla [x1,y1,x2,y2]
         bbox = det.get("bbox")
         if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
             return float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
 
-        # 2) box como lista/tupla
         box = det.get("box")
         if isinstance(box, (list, tuple)) and len(box) == 4:
             return float(box[0]), float(box[1]), float(box[2]), float(box[3])
 
-        # 3) xyxy
         xyxy = det.get("xyxy")
         if isinstance(xyxy, (list, tuple)) and len(xyxy) == 4:
             return float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])
 
-        # 4) bbox como dict {'x1':..,'y1':..,'x2':..,'y2':..}
         if isinstance(bbox, dict):
             keys = ("x1", "y1", "x2", "y2")
             if all(k in bbox for k in keys):
                 return float(bbox["x1"]), float(bbox["y1"]), float(bbox["x2"]), float(bbox["y2"])
 
-        # 5) bbox como dict {'left','top','right','bottom'}
         if isinstance(bbox, dict):
             keys = ("left", "top", "right", "bottom")
             if all(k in bbox for k in keys):
                 return float(bbox["left"]), float(bbox["top"]), float(bbox["right"]), float(bbox["bottom"])
 
-        # 6) det directo con x1,y1,x2,y2
         if all(k in det for k in ("x1", "y1", "x2", "y2")):
             return float(det["x1"]), float(det["y1"]), float(det["x2"]), float(det["y2"])
 
         return None
 
-    def _dist(self, a, b):
-        return math.hypot(a["cx"] - b["cx"], a["cy"] - b["cy"])
-
     def _update_tracks(self, det_items):
-        """
-        Matching greedy por distancia + misma clase (grupo label).
-        - Actualiza hits/misses.
-        - Crea nuevos IDs para no-match.
-        - Cuenta UNIQUE solo cuando un track se confirma (hits >= TRACK_CONFIRM_FRAMES) y aún no fue contado.
-        """
-        # 1) marcar todos como no vistos en este tick
         for tid in list(self._tracks.keys()):
             self._tracks[tid]["seen_this_tick"] = False
 
-        # 2) construir lista de pares posibles (tid, det_idx, dist) que cumplan umbral + misma clase/grupo
         pairs = []
         for det_idx, det in enumerate(det_items):
             det_group = self._label_group(det["label"])
             for tid, tr in self._tracks.items():
                 tr_group = self._label_group(tr["label"])
-                # Restricción: misma categoría (apto/noapto/otro)
                 if det_group != tr_group:
                     continue
                 d = math.hypot(det["cx"] - tr["cx"], det["cy"] - tr["cy"])
                 if d <= TRACK_MAX_DIST_PX:
                     pairs.append((d, tid, det_idx))
 
-        # ordenar por menor distancia
         pairs.sort(key=lambda x: x[0])
-
         matched_tracks = set()
         matched_dets = set()
 
-        # 3) greedy matching
         for d, tid, det_idx in pairs:
             if tid in matched_tracks or det_idx in matched_dets:
                 continue
@@ -588,22 +557,19 @@ class AnalisisChatWindow(QWidget):
             tr = self._tracks[tid]
             tr["cx"] = det["cx"]
             tr["cy"] = det["cy"]
-            tr["label"] = det["label"]  # mantener label actual
+            tr["label"] = det["label"]
             tr["misses"] = 0
             tr["hits"] += 1
             tr["seen_this_tick"] = True
 
-            # ✅ contar unique SOLO cuando se confirma por hits y no contado
             if (not tr["counted"]) and tr["hits"] >= TRACK_CONFIRM_FRAMES:
                 tr["counted"] = True
                 self._inc_unique_by_label(tr["label"])
 
-        # 4) tracks no matched => misses++
         for tid, tr in list(self._tracks.items()):
             if not tr.get("seen_this_tick"):
                 tr["misses"] += 1
 
-        # 5) dets no matched => crear nuevos tracks
         for det_idx, det in enumerate(det_items):
             if det_idx in matched_dets:
                 continue
@@ -618,9 +584,7 @@ class AnalisisChatWindow(QWidget):
                 "counted": False,
                 "seen_this_tick": True,
             }
-            # NO se cuenta de inmediato; se cuenta al confirmar (hits>=TRACK_CONFIRM_FRAMES)
 
-        # 6) eliminar tracks viejos
         for tid in list(self._tracks.keys()):
             if self._tracks[tid]["misses"] > TRACK_MAX_MISSES:
                 del self._tracks[tid]
@@ -631,9 +595,6 @@ class AnalisisChatWindow(QWidget):
             self.live_aptos_unique += 1
         elif grp == "noapto":
             self.live_noaptos_unique += 1
-        else:
-            # si quisieras contar "otros", agrégalo aquí
-            pass
         self.live_total_unique = self.live_aptos_unique + self.live_noaptos_unique
 
     def _update_unique_labels(self):
@@ -716,6 +677,7 @@ class AnalisisChatWindow(QWidget):
 
         img_para_pdf = self.path_imagen_anotada or self.path_imagen
 
+        # PDF normal (ya lo tenías)
         path_pdf = generar_pdf_reporte(
             self.nombre_usuario,
             resumen,
@@ -724,6 +686,35 @@ class AnalisisChatWindow(QWidget):
             no_aptos=self.no_aptos,
             hectarea=hectarea
         )
+
+        # ==========================
+        # ✅ NUEVO: Exportación avanzada (CSV / JSON / PDF analítico)
+        # ==========================
+        try:
+            rep = construir_reporte_analitico(
+                nombre_usuario=self.nombre_usuario,
+                hectarea=hectarea,
+                resumen=resumen,
+                aptos=self.aptos,
+                no_aptos=self.no_aptos,
+            )
+
+            csv_path = exportar_reporte_analitico_csv(rep)
+            json_path = exportar_reporte_analitico_json(rep)
+
+            pdf_analitico = generar_pdf_reporte_analitico(
+                rep,
+                path_imagen=img_para_pdf
+            )
+
+            self.chat_area.append(
+                "<span style='color:#38761d;'><b>📊 Exportación analítica generada:</b></span><br>"
+                f"CSV: {csv_path}<br>"
+                f"JSON: {json_path}<br>"
+                f"PDF Analítico: {pdf_analitico}"
+            )
+        except Exception as e:
+            self.chat_area.append(f"<span style='color:#ba1a1a;'>⚠️ No se pudo exportar analítica: {e}</span>")
 
         planta = "Espárrago"
         enfermedad = "Detectado espárrago enfermo" if self.no_aptos > 0 else "Cultivo saludable"

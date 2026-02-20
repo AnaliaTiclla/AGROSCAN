@@ -15,29 +15,10 @@ import pyodbc
 # Configuración de conexión
 # ========================
 
-DATABASE = os.getenv("MSSQL_DATABASE", "AgroScanDB")
-
-# Opción A (la que ya te funciona): Named Pipes
-CONN_STR = (
-    "DRIVER={ODBC Driver 17 for SQL Server};"
-    r"SERVER=np:\\.\pipe\sql\query;"
-    f"DATABASE={DATABASE};"
-    "Trusted_Connection=yes;"
-    "Encrypt=yes;TrustServerCertificate=yes;"
-)
-
-# Opción B (cuando habilites TCP/1433), descomenta y comenta la anterior:
-# CONN_STR = (
-#     "DRIVER={ODBC Driver 17 for SQL Server};"
-#     "SERVER=tcp:DESKTOP-PA2JFUM,1433;"
-#     f"DATABASE={DATABASE};"
-#     "Trusted_Connection=yes;"
-#     "Encrypt=yes;TrustServerCertificate=yes;"
-# )
+from DATA.db_pool import get_conn  # o get_conn_with_retry
 
 def _conn():
-    """Obtiene conexión pyodbc (sin autocommit)."""
-    return pyodbc.connect(CONN_STR, autocommit=False)
+    return get_conn()
 
 # ========================
 # Utilidades
