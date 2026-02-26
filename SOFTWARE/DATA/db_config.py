@@ -29,7 +29,8 @@ def build_conn_str() -> str:
     ]
 
     if mode == "LOCAL_NP":
-        parts.insert(1, r"SERVER=np:\\.\pipe\sql\query;")
+        local_server = os.getenv("MSSQL_SERVER", r".\SQLEXPRESS")
+        parts.insert(1, f"SERVER={local_server};")
         parts.append("Trusted_Connection=yes;")
         return "".join(parts)
 
