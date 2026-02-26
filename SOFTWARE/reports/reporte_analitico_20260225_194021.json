@@ -1,0 +1,29 @@
+{
+  "metadata": {
+    "sistema": "AgroScan",
+    "usuario": "ana1",
+    "hectarea": null,
+    "fecha_hora": "2026-02-25 19:40:21"
+  },
+  "kpis": {
+    "aptos": 1,
+    "no_aptos": 0,
+    "total": 1,
+    "pct_aprobacion": 100.0,
+    "nivel_calidad": "B",
+    "score": 100
+  },
+  "analitica": {
+    "conteos_por_etiqueta": {
+      "Espárrago sano": 1
+    },
+    "distribucion_por_etiqueta": [
+      {
+        "etiqueta": "Espárrago sano",
+        "conteo": 1,
+        "porcentaje": 100.0
+      }
+    ]
+  },
+  "resumen_texto": "Espárrago sano: 1"
+}

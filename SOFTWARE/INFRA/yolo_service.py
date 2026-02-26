@@ -2,7 +2,7 @@
 import os
 import cv2
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Iterable, Union
+from typing import Dict, List, Tuple, Optional, Union
 from ultralytics import YOLO
 from UTILS.clases import CLASES_MAP  # usamos normalización externa
 
@@ -17,6 +17,92 @@ if not os.path.exists(RUTA_MODELO):
 MODEL = YOLO(RUTA_MODELO)
 
 # =========================
+# Clasificación automática por niveles de calidad
+# (NO rompe nada existente: solo agrega funciones nuevas)
+# =========================
+#
+# Criterio propuesto (simple y robusto):
+# - Se calcula % sano (sanos/total) y total detectados
+# - Se asigna un nivel (A, B, C, D) en base al % sano
+# - Si total es muy bajo (poca evidencia), se baja 1 nivel para evitar falsos "A"
+#
+# Puedes ajustar umbrales sin tocar UI/BD.
+QUALITY_LEVELS = [
+    ("A", 0.90),  # >= 90% sano
+    ("B", 0.75),  # >= 75% sano
+    ("C", 0.50),  # >= 50% sano
+    ("D", 0.00),  # < 50% sano
+]
+
+MIN_DETECTIONS_FOR_CONFIDENCE = 5  # si hay menos de esto, reducimos 1 nivel (opcional)
+
+
+def clasificar_calidad_por_niveles(detections: List[Dict]) -> Dict[str, Union[str, float, int]]:
+    """
+    Clasifica automáticamente por niveles de calidad (A/B/C/D) usando las detecciones.
+
+    Retorna un dict listo para usar en UI/BD si deseas:
+      {
+        "nivel": "A"|"B"|"C"|"D",
+        "pct_sano": 0.0..1.0,
+        "sanos": int,
+        "enfermos": int,
+        "total": int,
+        "score": 0..100
+      }
+
+    Nota: No modifica el flujo actual. Es una mejora añadida.
+    """
+    tot = conteo_sanos_enfermos(detections)
+    sanos = int(tot.get("sanos", 0))
+    enfermos = int(tot.get("enfermos", 0))
+    total = int(tot.get("total", sanos + enfermos))
+
+    if total <= 0:
+        return {
+            "nivel": "D",
+            "pct_sano": 0.0,
+            "sanos": 0,
+            "enfermos": 0,
+            "total": 0,
+            "score": 0,
+        }
+
+    pct_sano = sanos / total
+
+    # Determinar nivel por umbral de porcentaje sano
+    nivel = "D"
+    for lvl, thr in QUALITY_LEVELS:
+        if pct_sano >= thr:
+            nivel = lvl
+            break
+
+    # Regla anti-sesgo por baja evidencia: si hay muy pocas detecciones, baja 1 nivel (opcional)
+    if total < MIN_DETECTIONS_FOR_CONFIDENCE:
+        nivel = _bajar_un_nivel(nivel)
+
+    # Score (0..100) directamente del % sano
+    score = int(round(pct_sano * 100))
+
+    return {
+        "nivel": nivel,
+        "pct_sano": float(pct_sano),
+        "sanos": sanos,
+        "enfermos": enfermos,
+        "total": total,
+        "score": score,
+    }
+
+
+def _bajar_un_nivel(nivel: str) -> str:
+    orden = ["A", "B", "C", "D"]
+    if nivel not in orden:
+        return "D"
+    i = orden.index(nivel)
+    return orden[min(i + 1, len(orden) - 1)]
+
+
+# =========================
 # Utilidades de colores
 # =========================
 def _color_from_label(label: str) -> Tuple[int, int, int]:
@@ -27,6 +113,7 @@ def _color_from_label(label: str) -> Tuple[int, int, int]:
         return (46, 204, 113)  # verde-ish
     h = hash(label)
     return ((h >> 0) & 0xFF, (h >> 8) & 0xFF, (h >> 16) & 0xFF)
+
 
 # =========================
 # NMS simple por IoU
@@ -40,10 +127,11 @@ def _iou(box1: List[int], box2: List[int]) -> float:
     inter_area = inter_w * inter_h
     if inter_area <= 0:
         return 0.0
-    area1 = max(0, box1[2]-box1[0]) * max(0, box1[3]-box1[1])
-    area2 = max(0, box2[2]-box2[0]) * max(0, box2[3]-box2[1])
+    area1 = max(0, box1[2] - box1[0]) * max(0, box1[3] - box1[1])
+    area2 = max(0, box2[2] - box2[0]) * max(0, box2[3] - box2[1])
     denom = float(area1 + area2 - inter_area)
     return inter_area / denom if denom > 0 else 0.0
+
 
 def _nms_per_group(dets: List[Dict], iou_threshold: float) -> List[Dict]:
     keep: List[Dict] = []
@@ -52,6 +140,7 @@ def _nms_per_group(dets: List[Dict], iou_threshold: float) -> List[Dict]:
         if not overlapped:
             keep.append(d)
     return keep
+
 
 # =========================
 # Core de análisis
@@ -71,9 +160,13 @@ def _run_model(img_or_path: Union[str, np.ndarray],
             "name": raw_name,             # nombre crudo del modelo
             "label": label_es,            # normalizado (Espárrago sano/enfermo)
             "box": [int(x1), int(y1), int(x2), int(y2)],
-            "confidence": float(conf)
+            "confidence": float(conf),
+            # (no afecta nada si no lo usas) puedes guardar si fue sano/enfermo:
+            "es_sano": str(label_es).strip().lower() == "espárrago sano".lower(),
+            "es_enfermo": str(label_es).strip().lower() == "espárrago enfermo".lower(),
         })
     return detections
+
 
 def _group_and_nms(detections: List[Dict],
                    iou_threshold: float = 0.30) -> List[Dict]:
@@ -85,6 +178,7 @@ def _group_and_nms(detections: List[Dict],
         final_dets.extend(_nms_per_group(dets, iou_threshold))
     return final_dets
 
+
 def _draw_dets(image: np.ndarray, dets: List[Dict]) -> np.ndarray:
     out = image.copy()
     for d in dets:
@@ -95,6 +189,7 @@ def _draw_dets(image: np.ndarray, dets: List[Dict]) -> np.ndarray:
         cv2.putText(out, txt, (x1, max(20, y1 - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
     return out
+
 
 def analizar_imagen_yolo(
     img_or_path: Union[str, np.ndarray],
@@ -116,6 +211,7 @@ def analizar_imagen_yolo(
     annotated = _draw_dets(img, final_dets) if draw else None
     return final_dets, annotated
 
+
 # =========================
 # Resúmenes y conteos
 # =========================
@@ -124,6 +220,7 @@ def conteos_por_label(detections: List[Dict]) -> Dict[str, int]:
     for d in detections:
         summary[d["label"]] = summary.get(d["label"], 0) + 1
     return summary
+
 
 def conteo_sanos_enfermos(detections: List[Dict]) -> Dict[str, int]:
     c = conteos_por_label(detections)

@@ -1,0 +1,29 @@
+{
+  "metadata": {
+    "sistema": "AgroScan",
+    "usuario": "Gustavo Vilela",
+    "hectarea": "H1",
+    "fecha_hora": "2026-02-24 21:14:49"
+  },
+  "kpis": {
+    "aptos": 0,
+    "no_aptos": 1,
+    "total": 1,
+    "pct_aprobacion": 0.0,
+    "nivel_calidad": "D",
+    "score": 0
+  },
+  "analitica": {
+    "conteos_por_etiqueta": {
+      "Espárrago enfermo": 1
+    },
+    "distribucion_por_etiqueta": [
+      {
+        "etiqueta": "Espárrago enfermo",
+        "conteo": 1,
+        "porcentaje": 100.0
+      }
+    ]
+  },
+  "resumen_texto": "Espárrago enfermo: 1"
+}

@@ -2,12 +2,8 @@
 # - Resumen por hectárea (vw_dashboard_supervisor)
 # - Gráfico de barras (Aptos / No aptos por hectárea)
 # - Panel de asignación: Agricultor ↔ Hectárea
-#
-# Requiere en database_mssql.py (expuestos vía database.py):
-#   - dashboard_supervisor(date_from=None, date_to=None)
-#   - hectareas_disponibles()
-#   - obtener_agricultores()
-#   - asignar_hectarea(agricultor_id, hectarea_id)
+# - ✅ NUEVO: Nivel + Score por hectárea (calculado en UI)
+# - ✅ NUEVO: Botón para QUITAR (desasignar) hectárea a un agricultor
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
@@ -15,14 +11,22 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QDate
 from PyQt5.QtGui import QFont, QIcon
+
 from DATA.database import (
     dashboard_supervisor, hectareas_disponibles,
     obtener_agricultores, asignar_hectarea
 )
 
+# Intentar importar una función dedicada si existe (no rompe si no existe)
+try:
+    from DATA.database import desasignar_hectarea  # opcional
+except Exception:
+    desasignar_hectarea = None
+
 # Matplotlib embebido
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+
 
 BASE_STYLESHEET = """
 QWidget { font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; }
@@ -36,6 +40,48 @@ QGroupBox { border: 1px solid #d2e59e; border-radius: 8px; margin-top: 10px; }
 QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; color: #386641; }
 """
 
+# =========================
+# Clasificación automática de calidad
+# =========================
+QUALITY_LEVELS = [
+    ("A", 0.90),
+    ("B", 0.75),
+    ("C", 0.50),
+    ("D", 0.00),
+]
+MIN_DETECTIONS_FOR_CONFIDENCE = 5
+
+
+def _bajar_un_nivel(nivel: str) -> str:
+    orden = ["A", "B", "C", "D"]
+    if nivel not in orden:
+        return "D"
+    i = orden.index(nivel)
+    return orden[min(i + 1, len(orden) - 1)]
+
+
+def clasificar_calidad(aptos: int, no_aptos: int):
+    """Retorna (nivel, score_0_100, pct_aptos_0_1, total)."""
+    a = int(aptos or 0)
+    n = int(no_aptos or 0)
+    total = a + n
+    if total <= 0:
+        return ("D", 0, 0.0, 0)
+
+    pct01 = a / total
+    nivel = "D"
+    for lvl, thr in QUALITY_LEVELS:
+        if pct01 >= thr:
+            nivel = lvl
+            break
+
+    if total < MIN_DETECTIONS_FOR_CONFIDENCE:
+        nivel = _bajar_un_nivel(nivel)
+
+    score = int(round(pct01 * 100))
+    return (nivel, score, pct01, total)
+
+
 class SupervisorDashboardWindow(QWidget):
     """
     Dashboard global del supervisor:
@@ -43,7 +89,9 @@ class SupervisorDashboardWindow(QWidget):
       - Tabla por hectárea
       - Gráfico de barras
       - Asignación Agricultor ↔ Hectárea
+      - ✅ Desasignación (quitar hectárea a agricultor)
     """
+
     def __init__(self, nombre_usuario: str = "Supervisor", supervisor_id: int = 1):
         super().__init__()
         self.nombre_usuario = nombre_usuario
@@ -88,20 +136,20 @@ class SupervisorDashboardWindow(QWidget):
         filter_bar.addWidget(self.btn_refresh)
         root.addLayout(filter_bar)
 
-        # KPIs totales
+        # KPIs totales (✅ con tu diseño)
         kpi_bar = QHBoxLayout()
         self.card_aptos = self._make_kpi("Aptos (total)", "0")
         self.card_noapt = self._make_kpi("No aptos (total)", "0")
-        self.card_pct   = self._make_kpi("% Aprobación global", "0%")
+        self.card_pct = self._make_kpi("% Aprobación global", "0%")
         kpi_bar.addWidget(self.card_aptos)
         kpi_bar.addWidget(self.card_noapt)
         kpi_bar.addWidget(self.card_pct)
         root.addLayout(kpi_bar)
 
-        # Tabla por hectárea
-        self.table = QTableWidget(0, 7)
+        # Tabla por hectárea (✅ agrega Nivel y Score)
+        self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels([
-            "Hectárea", "Código", "Aptos", "No aptos", "Total", "% Aprob.", "Agricultores"
+            "Hectárea", "Código", "Aptos", "No aptos", "Total", "% Aprob.", "Nivel", "Score", "Agricultores"
         ])
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -111,6 +159,8 @@ class SupervisorDashboardWindow(QWidget):
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.Stretch)
         header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
         self.table.setAlternatingRowColors(True)
         root.addWidget(self.table)
 
@@ -120,13 +170,19 @@ class SupervisorDashboardWindow(QWidget):
         root.addWidget(self.canvas)
 
         # Panel de asignación
-        assign_box = QGroupBox("Asignar Agricultor a Hectárea")
+        assign_box = QGroupBox("Asignar / Quitar Agricultor de Hectárea")
         h = QHBoxLayout()
+
         self.cbx_hectarea = QComboBox()
         self.cbx_agricultor = QComboBox()
+
         self.btn_asignar = QPushButton("Asignar")
         self.btn_asignar.setIcon(QIcon("iconos/icon-assign.png"))
         self.btn_asignar.clicked.connect(self._asignar)
+
+        self.btn_quitar = QPushButton("Quitar asignación")
+        self.btn_quitar.setIcon(QIcon("iconos/icon-delete.png"))  # si no existe, igual funciona sin icono
+        self.btn_quitar.clicked.connect(self._quitar_asignacion)
 
         h.addWidget(QLabel("Hectárea:"))
         h.addWidget(self.cbx_hectarea, stretch=1)
@@ -135,6 +191,8 @@ class SupervisorDashboardWindow(QWidget):
         h.addWidget(self.cbx_agricultor, stretch=2)
         h.addStretch(1)
         h.addWidget(self.btn_asignar)
+        h.addWidget(self.btn_quitar)
+
         assign_box.setLayout(h)
         root.addWidget(assign_box)
 
@@ -145,13 +203,20 @@ class SupervisorDashboardWindow(QWidget):
         self.dt_to.dateChanged.connect(self._on_refresh)
 
     def _make_kpi(self, label: str, num: str) -> QFrame:
+        # ✅ Restaura tu diseño: QFrame#kpi + QLabel.kpilabel + QLabel.kpinum
         card = QFrame()
         card.setObjectName("kpi")
         v = QVBoxLayout(card)
-        l1 = QLabel(label); l1.setProperty("class", "kpilabel")
-        l2 = QLabel(num);   l2.setProperty("class", "kpinum")
-        v.addWidget(l1); v.addWidget(l2)
+
+        l1 = QLabel(label)
+        l1.setProperty("class", "kpilabel")
+        l2 = QLabel(num)
+        l2.setProperty("class", "kpinum")
+
+        v.addWidget(l1)
+        v.addWidget(l2)
         v.setContentsMargins(12, 8, 12, 8)
+
         card._num = l2
         return card
 
@@ -162,7 +227,7 @@ class SupervisorDashboardWindow(QWidget):
         d2 = self.dt_to.date().toString("yyyy-MM-dd")
         return f"{d1} 00:00:00", f"{d2} 23:59:59"
 
-    def _center_item(self, txt):
+    def _center_item(self, txt: str):
         it = QTableWidgetItem(txt)
         it.setTextAlignment(Qt.AlignCenter)
         return it
@@ -186,39 +251,38 @@ class SupervisorDashboardWindow(QWidget):
 
     def _load_data(self):
         date_from, date_to = self._range_strings_inclusive()
-
-        rows = dashboard_supervisor(date_from, date_to)  # resumen por hectárea
+        rows = dashboard_supervisor(date_from, date_to)
 
         # KPIs globales
         total_aptos = sum(int(r.get("total_aptos") or 0) for r in rows)
-        total_no    = sum(int(r.get("total_no_aptos") or 0) for r in rows)
-        total       = total_aptos + total_no
-        pct         = round((total_aptos / total) * 100, 2) if total else 0.0
+        total_no = sum(int(r.get("total_no_aptos") or 0) for r in rows)
+        total = total_aptos + total_no
+        pct = round((total_aptos / total) * 100, 2) if total else 0.0
 
         self.card_aptos._num.setText(str(total_aptos))
         self.card_noapt._num.setText(str(total_no))
         self.card_pct._num.setText(f"{pct}%")
 
-        # Tabla
         self._fill_table(rows)
-
-        # Gráfico
         self._plot_bars(rows)
 
     def _fill_table(self, rows):
         self.table.setSortingEnabled(False)
         self.table.clearContents()
         self.table.setRowCount(len(rows))
+
         for i, r in enumerate(rows):
             hect = r.get("nombre_hectarea") or "-"
             code = r.get("codigo_hectarea") or "-"
-            apt  = int(r.get("total_aptos") or 0)
+            apt = int(r.get("total_aptos") or 0)
             noap = int(r.get("total_no_aptos") or 0)
-            tot  = int(r.get("total_registrados") or (apt + noap))
-            pct  = r.get("pct_aptos")
+            tot = int(r.get("total_registrados") or (apt + noap))
+            pct = r.get("pct_aptos")
             if pct is None:
                 pct = round((apt / tot) * 100, 2) if tot else 0.0
             agri = int(r.get("agricultores_participantes") or 0)
+
+            nivel, score, _, _ = clasificar_calidad(apt, noap)
 
             self.table.setItem(i, 0, self._center_item(str(hect)))
             self.table.setItem(i, 1, self._center_item(str(code)))
@@ -226,7 +290,9 @@ class SupervisorDashboardWindow(QWidget):
             self.table.setItem(i, 3, self._center_item(str(noap)))
             self.table.setItem(i, 4, self._center_item(str(tot)))
             self.table.setItem(i, 5, self._center_item(f"{pct}%"))
-            self.table.setItem(i, 6, self._center_item(str(agri)))
+            self.table.setItem(i, 6, self._center_item(str(nivel)))
+            self.table.setItem(i, 7, self._center_item(f"{score}/100"))
+            self.table.setItem(i, 8, self._center_item(str(agri)))
 
         self.table.setSortingEnabled(True)
 
@@ -235,8 +301,8 @@ class SupervisorDashboardWindow(QWidget):
         ax = self.figure.add_subplot(111)
 
         labels = [r.get("codigo_hectarea") or "" for r in rows] or ["Hectárea"]
-        aptos  = [int(r.get("total_aptos") or 0) for r in rows] or [0]
-        noapt  = [int(r.get("total_no_aptos") or 0) for r in rows] or [0]
+        aptos = [int(r.get("total_aptos") or 0) for r in rows] or [0]
+        noapt = [int(r.get("total_no_aptos") or 0) for r in rows] or [0]
 
         x = range(len(labels))
         # Barras apiladas
@@ -267,10 +333,10 @@ class SupervisorDashboardWindow(QWidget):
         self.cbx_hectarea.clear()
         self._hect_id_by_index = []
         for h in hects:
-            h_id   = int(h["id"])
+            h_id = int(h["id"])
             codigo = h.get("codigo") or f"H{h_id}"
-            asign  = int(h.get("agricultor_asignado") or 0)
-            label  = f"{codigo} — {'LIBRE' if asign == 0 else f'Asignado (id={asign})'}"
+            asign = int(h.get("agricultor_asignado") or 0)
+            label = f"{codigo} — {'LIBRE' if asign == 0 else f'Asignado (id={asign})'}"
             self.cbx_hectarea.addItem(label)
             self._hect_id_by_index.append(h_id)
 
@@ -298,7 +364,54 @@ class SupervisorDashboardWindow(QWidget):
 
         if ok:
             QMessageBox.information(self, "Éxito", "Asignación aplicada.")
-            self.refrescar_dashboard()  # refrescar dashboard
-            self._load_assign_ui()      # refrescar combos (LIBRE/asignado)
+            self.refrescar_dashboard()
+            self._load_assign_ui()
         else:
             QMessageBox.critical(self, "Error", "No se pudo aplicar la asignación.")
+
+    def _quitar_asignacion(self):
+        """✅ NUEVO: Quita la asignación de la hectárea seleccionada."""
+        if self.cbx_hectarea.currentIndex() < 0:
+            QMessageBox.warning(self, "Atención", "Selecciona una hectárea.")
+            return
+
+        hect_id = self._hect_id_by_index[self.cbx_hectarea.currentIndex()]
+        hect_label = self.cbx_hectarea.currentText()
+
+        resp = QMessageBox.question(
+            self,
+            "Confirmar",
+            f"¿Seguro que deseas QUITAR la asignación de esta hectárea?\n\n{hect_label}",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if resp != QMessageBox.Yes:
+            return
+
+        # 1) Si existe función dedicada, úsala
+        if desasignar_hectarea is not None:
+            try:
+                ok = desasignar_hectarea(hect_id)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"No se pudo quitar la asignación:\n{e}")
+                return
+        else:
+            # 2) Fallback común: asignar agricultor_id = 0 (o NULL en BD si tu SP lo interpreta)
+            #    Si tu backend no acepta 0, crea desasignar_hectarea en DATA/database.py.
+            try:
+                ok = asignar_hectarea(0, hect_id)
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Error",
+                    "Tu backend no soporta quitar asignación con 'agricultor_id = 0'.\n"
+                    "Crea la función desasignar_hectarea(hectarea_id) en DATA/database.py.\n\n"
+                    f"Detalle técnico: {e}"
+                )
+                return
+
+        if ok:
+            QMessageBox.information(self, "Éxito", "Asignación quitada.")
+            self.refrescar_dashboard()
+            self._load_assign_ui()
+        else:
+            QMessageBox.critical(self, "Error", "No se pudo quitar la asignación.")
